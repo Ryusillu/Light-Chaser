@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Light Chaser · 手势聚光灯</title>
+
+  <!-- CDN: p5.js + ml5.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
+  <script src="https://unpkg.com/ml5@1/dist/ml5.min.js"></script>
+
+  <style>
+    :root {
+      --glow: #ffe9a8;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      background: #000;
+      overflow: hidden;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                   "Microsoft YaHei", sans-serif;
+      color: #e8e2d2;
+    }
+
+    /* p5 canvas 铺满全屏，放在最底层 */
+    canvas {
+      display: block;
+      position: fixed;
+      inset: 0;
+      z-index: 1;
+    }
+
+    /* ---------- 启动遮罩 ---------- */
+    #overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 10;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 28px;
+      background: radial-gradient(circle at 50% 45%, #14120c 0%, #000 65%);
+      transition: opacity 0.8s ease, visibility 0.8s ease;
+    }
+
+    #overlay.hidden {
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
+    }
+
+    .title {
+      font-size: clamp(26px, 5vw, 56px);
+      letter-spacing: 0.28em;
+      font-weight: 300;
+      text-transform: uppercase;
+      margin: 0;
+      color: #f3ecd9;
+      text-shadow: 0 0 24px rgba(255, 230, 160, 0.35);
+    }
+
+    .subtitle {
+      margin: -12px 0 0;
+      font-size: clamp(12px, 1.4vw, 15px);
+      letter-spacing: 0.22em;
+      color: #8a8474;
+      text-align: center;
+      line-height: 1.9;
+    }
+
+    #startBtn {
+      appearance: none;
+      cursor: pointer;
+      border: 1px solid rgba(255, 233, 168, 0.45);
+      background: rgba(255, 233, 168, 0.06);
+      color: var(--glow);
+      padding: 15px 46px;
+      border-radius: 999px;
+      font-size: 15px;
+      letter-spacing: 0.22em;
+      transition: all 0.3s ease;
+      backdrop-filter: blur(4px);
+    }
+
+    #startBtn:hover:not(:disabled) {
+      background: rgba(255, 233, 168, 0.18);
+      box-shadow: 0 0 32px rgba(255, 233, 168, 0.35);
+      transform: translateY(-1px);
+    }
+
+    #startBtn:disabled {
+      cursor: default;
+      opacity: 0.65;
+    }
+
+    .hint-list {
+      font-size: 12.5px;
+      letter-spacing: 0.12em;
+      color: #6e6a5d;
+      line-height: 2.1;
+      text-align: center;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .hint-list b {
+      color: #b8b09a;
+      font-weight: 500;
+    }
+
+    /* ---------- 状态提示（右上角） ---------- */
+    #hud {
+      position: fixed;
+      top: 20px;
+      right: 24px;
+      z-index: 5;
+      font-size: 11.5px;
+      letter-spacing: 0.16em;
+      color: #7d7768;
+      text-align: right;
+      line-height: 1.9;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.6s ease;
+    }
+
+    #hud.visible { opacity: 1; }
+    #hud .on  { color: #cfe8b0; }
+    #hud .off { color: #7a6a5a; }
+
+    /* 摄像头预览（调试用，默认隐藏，给 body 加 .debug 显示） */
+    #cam-preview {
+      position: fixed;
+      left: 20px;
+      bottom: 20px;
+      width: 180px;
+      z-index: 5;
+      border-radius: 6px;
+      opacity: 0.55;
+      display: none;
+      pointer-events: none;
+      transform: scaleX(-1);
+    }
+
+    body.debug #cam-preview { display: block; }
+  </style>
+</head>
+<body>
+  <!-- p5 会自动创建全屏 canvas -->
+
+  <!-- 启动遮罩：必须由用户点击才能申请摄像头（浏览器安全策略） -->
+  <div id="overlay">
+    <h1 class="title">Light Chaser</h1>
+    <p class="subtitle">用你的手，照亮这片黑暗</p>
+    <button id="startBtn">开启摄像头</button>
+    <ul class="hint-list">
+      <li><b>移动手</b> · 光斑跟随</li>
+      <li><b>靠近 / 远离</b> · 光斑放大 / 缩小</li>
+      <li><b>握拳</b> 熄灭聚光灯 &nbsp;·&nbsp; <b>摊开手掌</b> 点亮聚光灯</li>
+    </ul>
+  </div>
+
+  <!-- 运行状态 -->
+  <div id="hud">
+    <div id="hudHand">○ 未检测到手</div>
+    <div id="hudLight" class="on">● 灯光：开</div>
+  </div>
+
+  <video id="cam-preview" muted playsinline></video>
+
+  <script src="sketch.js"></script>
+</body>
+</html>
