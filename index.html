@@ -136,21 +136,25 @@
     #hud .on  { color: #cfe8b0; }
     #hud .off { color: #7a6a5a; }
 
-    /* 摄像头预览（调试用，默认隐藏，给 body 加 .debug 显示） */
+        /* ---------- 摄像头实时预览（右下角 150×150） ---------- */
     #cam-preview {
       position: fixed;
-      left: 20px;
+      right: 20px;
       bottom: 20px;
-      width: 180px;
-      z-index: 5;
-      border-radius: 6px;
-      opacity: 0.55;
-      display: none;
-      pointer-events: none;
-      transform: scaleX(-1);
+      width: 150px;
+      height: 150px;
+      z-index: 6;
+      object-fit: cover;         /* 视频铺满方形窗口，不变形 */
+      border: 1px solid rgba(255, 233, 168, 0.25);
+      border-radius: 8px;
+      box-shadow: 0 0 18px rgba(0, 0, 0, 0.6);
+      pointer-events: none;      /* 不干扰画布上的手势/鼠标操作 */
+      transform: scaleX(-1);     /* 镜像显示，和手势方向一致 */
+      display: none;             /* 摄像头启动成功后才显示 */
+      background: #000;
     }
 
-    body.debug #cam-preview { display: block; }
+    #cam-preview.visible { display: block; }
   </style>
 </head>
 <body>

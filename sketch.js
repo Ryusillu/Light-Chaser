@@ -8,6 +8,7 @@
 //   3. 握拳             → 熄灭聚光灯（防抖）
 //      摊开手掌         → 重新点亮
 //   4. 点击按钮开启摄像头（满足浏览器安全策略）
+//   5. 右下角 150×150 摄像头实时预览窗口（便于观察摄像头画面）
 //
 //  优化点：
 //   - landmark 低通平滑 + 缓动跟随，抑制识别抖动
@@ -100,9 +101,9 @@ function cacheDomElements() {
   hudEl = document.getElementById("hud");
   hudHandEl = document.getElementById("hudHand");
   hudLightEl = document.getElementById("hudLight");
-  overlayEl = document.getElementById("overlay");
+    overlayEl = document.getElementById("overlay");
   startBtnEl = document.getElementById("startBtn");
-  camPreviewEl = document.getElementById("cam-preview");
+  camPreviewEl = document.getElementById("cam-preview"); // 右下角 150×150 实时预览
 }
 
 // ============================================================
@@ -138,10 +139,11 @@ async function startCamera() {
   video.size(640, 480);
   video.hide();
 
-  // 左下角调试预览（按 D 切换显示）
+    // 右下角 150×150 摄像头实时预览（方便观察摄像头拍到的画面）
   if (camPreviewEl) {
     camPreviewEl.srcObject = stream;
     camPreviewEl.play().catch(() => {});
+    camPreviewEl.classList.add("visible");
   }
 
   startBtnEl.textContent = "正在加载手势模型…（首次约 10s）";
@@ -285,8 +287,8 @@ function updateLightFromHands() {
  */
 function countFoldedFingers(lm) {
   const tips = [8, 12, 16, 20];
-  const pips = [6, 10, 14, 18];
-    const wrist = lm[0];
+    const pips = [6, 10, 14, 18];
+  const wrist = lm[0];
   let folded = 0;
 
   for (let i = 0; i < 4; i++) {
@@ -473,7 +475,6 @@ function windowResized() {
 // ============================================================
 //  键盘调试
 //   [ / ]  微调 z 深度映射范围（校准远近灵敏度）
-//   D      切换摄像头预览
 //   SPACE  手动切换灯光
 // ============================================================
 function keyPressed() {
@@ -491,7 +492,5 @@ function keyPressed() {
     zNear += 0.01;
     zFar += 0.01;
     console.log("z 范围:", zNear.toFixed(2), "→", zFar.toFixed(2));
-    } else if (key === "d" || key === "D") {
-    document.body.classList.toggle("debug");
   }
 }
