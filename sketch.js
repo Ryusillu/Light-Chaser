@@ -23,8 +23,8 @@ let video = null;
 let hands = [];
 
 // ---- 运行状态 ----
-let started = false;    // 是否已成功启动摄像头 + 模型
-let poseReady = false;  // HandPose 模型是否就绪
+let started = false;   // 是否已成功启动摄像头 + 模型
+let poseReady = false; // HandPose 模型是否就绪
 
 // ---- 光斑显示值 ----
 let lightOn = true;
