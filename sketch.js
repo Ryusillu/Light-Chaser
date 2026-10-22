@@ -17,6 +17,15 @@
 //   - 光斑外碎片用极暗灰色绘制，亮灯/关灯之间平滑过渡
 //   - 握拳 / 摊掌都需连续多帧才切换，中间状态不触发
 //   - 长时间无手自动熄灯
+//
+//  【翻转一致性修正】
+//   预览 <video>（#cam-preview）、模型输入、landmark 坐标三者统一为
+//   “原始非镜像帧”：
+//     · 预览 <video> 去掉 CSS 镜像（由 index.html 同步修改）
+//     · ml5.handPose({ flipped: false }) —— 模型输入不再内部翻转
+//     · landmark 坐标即原始视频像素坐标
+//   只在画布映射的最后一步做一次水平镜像（x → 1 - x），
+//   让画面符合“照镜子”直觉，避免多处翻转互相打架导致识别失败。
 // ============================================================
 
 let handPose = null;
@@ -148,12 +157,14 @@ async function startCamera() {
 
   startBtnEl.textContent = "正在加载手势模型…（首次约 10s）";
 
-  // ---------- 2. HandPose 模型 ----------
+    // ---------- 2. HandPose 模型 ----------
   try {
-    // flipped: true → 与镜像画面一致，移动方向符合直觉
+    // flipped: false → 模型直接使用摄像头原始（非镜像）帧，
+    // 与 #cam-preview 的 srcObject 画面完全一致，保证识别与预览匹配。
+    // 镜像效果统一在 updateLightFromHands() 的画布映射中处理。
     handPose = await ml5.handPose({
       maxHands: 1, // 只识别单手，省算力
-      flipped: true,
+      flipped: false,
       modelType: "lite", // lite 模型更快
     });
 
@@ -247,14 +258,19 @@ function updateLightFromHands() {
     smoothWristZ += ((wrist.z || 0) - smoothWristZ) * SMOOTH_Z;
   }
 
-  // ---------- 位置：视频坐标 → 画布坐标（cover 映射，不变形）----------
+    // ---------- 位置：视频坐标 → 画布坐标（cover 映射，不变形）----------
+  // handPose 使用 flipped:false，landmark 坐标为原始（非镜像）视频像素坐标。
+  // 这里做一次水平镜像（x → 1 - x），使光斑移动方向符合“照镜子”直觉，
+  // 且与去掉 CSS 镜像的预览窗画面一一对应。
   const vw = 640;
   const vh = 480;
   const scale = Math.max(width / vw, height / vh);
   const offsetX = (width - vw * scale) / 2;
   const offsetY = (height - vh * scale) / 2;
 
-  targetX = clamp(smoothWristX * scale + offsetX, 0, width);
+  const mirroredX = vw - smoothWristX; // 镜像后的视频 x（像素）
+
+  targetX = clamp(mirroredX * scale + offsetX, 0, width);
   targetY = clamp(smoothWristY * scale + offsetY, 0, height);
 
   // ---------- 半径：z 深度映射（z 越小越靠近镜头 → 光斑越大）----------

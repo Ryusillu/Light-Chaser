@@ -136,7 +136,7 @@
     #hud .on  { color: #cfe8b0; }
     #hud .off { color: #7a6a5a; }
 
-        /* ---------- 摄像头实时预览（右下角 150×150） ---------- */
+                /* ---------- 摄像头实时预览（右下角 150×150） ---------- */
     #cam-preview {
       position: fixed;
       right: 20px;
@@ -149,7 +149,8 @@
       border-radius: 8px;
       box-shadow: 0 0 18px rgba(0, 0, 0, 0.6);
       pointer-events: none;      /* 不干扰画布上的手势/鼠标操作 */
-      transform: scaleX(-1);     /* 镜像显示，和手势方向一致 */
+      /* 不做 CSS 镜像：与 ml5 handPose flipped:false 的模型输入画面保持一致，
+         镜像效果统一在 sketch.js 的画布映射中处理 */
       display: none;             /* 摄像头启动成功后才显示 */
       background: #000;
     }
