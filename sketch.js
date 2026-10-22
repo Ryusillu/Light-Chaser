@@ -18,12 +18,18 @@
 //   - 握拳 / 摊掌都需连续多帧才切换，中间状态不触发
 //   - 长时间无手自动熄灯
 //
+//  【识别失败修复（关键）】
+//   ml5 1.x 的 handPose 结果中，每只手的关节点字段名是 keypoints
+//   （不是 landmarks）。之前误用 hands[0].landmarks 得到 undefined，
+//   导致每帧都在长度检查处 return，光斑永远不跟随 —— 表现为“识别不到手”。
+//   现已改为 hands[0].keypoints。
+//
 //  【翻转一致性修正】
-//   预览 <video>（#cam-preview）、模型输入、landmark 坐标三者统一为
+//   预览 <video>（#cam-preview）、模型输入、关键点坐标三者统一为
 //   “原始非镜像帧”：
 //     · 预览 <video> 去掉 CSS 镜像（由 index.html 同步修改）
 //     · ml5.handPose({ flipped: false }) —— 模型输入不再内部翻转
-//     · landmark 坐标即原始视频像素坐标
+//     · keypoints 坐标即原始视频像素坐标
 //   只在画布映射的最后一步做一次水平镜像（x → 1 - x），
 //   让画面符合“照镜子”直觉，避免多处翻转互相打架导致识别失败。
 // ============================================================
@@ -31,6 +37,10 @@
 let handPose = null;
 let video = null;
 let hands = [];
+
+// ---- 检测循环健康检查 ----
+let detectCallbackCount = 0; // detectStart 回调被调用的次数
+let usingManualDetect = false; // 是否切换到了手动逐帧检测模式
 
 // ---- 运行状态 ----
 let started = false;   // 是否已成功启动摄像头 + 模型
@@ -143,24 +153,34 @@ async function startCamera() {
     return;
   }
 
-  // 交给 p5 管理 video，然后隐藏（只作为检测输入，不显示画面）
-  video = createCapture(stream);
-  video.size(640, 480);
-  video.hide();
-
-    // 右下角 150×150 摄像头实时预览（方便观察摄像头拍到的画面）
+    // ---------- 检测输入：直接使用原生 <video>（#cam-preview） ----------
+  // 不再用 createCapture() 的 p5 封装对象，避免某些版本下 ml5 拿到
+  // 的是 0×0 的帧。原生 HTMLVideoElement 是 tfjs fromPixels 最稳的输入。
+  // 这个 <video> 同时作为右下角的实时预览窗（一物两用）。
   if (camPreviewEl) {
-    camPreviewEl.srcObject = stream;
-    camPreviewEl.play().catch(() => {});
-    camPreviewEl.classList.add("visible");
+    video = camPreviewEl;
+  } else {
+    // 兜底：万一 DOM 里没有 #cam-preview，就现场创建一个隐藏的 video
+    video = document.createElement("video");
+    video.playsInline = true;
+    video.muted = true;
+    video.style.cssText = "display:none";
+    document.body.appendChild(video);
+  }
+  video.srcObject = stream;
+  video.classList.add("visible");
+  try {
+    await video.play();
+  } catch (e) {
+    // 某些浏览器自动播放策略下 play() 可能被拒绝，忽略即可
   }
 
   startBtnEl.textContent = "正在加载手势模型…（首次约 10s）";
 
-    // ---------- 2. HandPose 模型 ----------
+        // ---------- 2. HandPose 模型 ----------
   try {
     // flipped: false → 模型直接使用摄像头原始（非镜像）帧，
-    // 与 #cam-preview 的 srcObject 画面完全一致，保证识别与预览匹配。
+    // 与预览窗画面完全一致，保证识别与预览匹配。
     // 镜像效果统一在 updateLightFromHands() 的画布映射中处理。
     handPose = await ml5.handPose({
       maxHands: 1, // 只识别单手，省算力
@@ -169,7 +189,22 @@ async function startCamera() {
     });
 
     await waitForVideo(); // 等视频真正出帧再开始检测
-    handPose.detectStart(video, gotHands);
+
+    // 关键日志：确认送进模型的确实是原生 video 且尺寸正常
+    console.log(
+      "[Light Chaser] 检测输入：",
+      video.constructor.name,
+      video.videoWidth + "×" + video.videoHeight,
+      "readyState=" + video.readyState
+    );
+
+    // 重置探测计数，用于判断检测循环是否真的在回调
+    detectCallbackCount = 0;
+
+    handPose.detectStart(video, (results) => {
+      detectCallbackCount++;
+      gotHands(results);
+    });
 
     poseReady = true;
     started = true;
@@ -177,6 +212,18 @@ async function startCamera() {
     // 淡出遮罩，显示 HUD
     overlayEl.classList.add("hidden");
     hudEl.classList.add("visible");
+
+    // ---------- 3. 兜底：若 detectStart 循环没跑起来，改用手动逐帧检测 ----------
+    setTimeout(() => {
+      if (detectCallbackCount === 0 && !usingManualDetect) {
+        console.warn(
+          "[Light Chaser] detectStart 未产生回调，切换到手动逐帧检测模式"
+        );
+        usingManualDetect = true;
+        handPose.detectStop();
+        manualDetectLoop();
+      }
+    }, 3000);
   } catch (err) {
     console.error("[Light Chaser] HandPose 初始化失败：", err);
     startBtnEl.disabled = false;
@@ -192,8 +239,8 @@ async function startCamera() {
 function waitForVideo(maxMs = 6000) {
   return new Promise((resolve) => {
     const t0 = performance.now();
-    const check = () => {
-      const el = video && video.elt;
+        const check = () => {
+      const el = video; // 原生 HTMLVideoElement
       if ((el && el.readyState >= 2 && el.videoWidth > 0) || performance.now() - t0 > maxMs) {
         resolve();
       } else {
@@ -202,6 +249,20 @@ function waitForVideo(maxMs = 6000) {
     };
     check();
   });
+}
+
+// ============================================================
+//  手动逐帧检测（detectStart 失效时的兜底方案）
+//  用 requestAnimationFrame 驱动，避免阻塞主线程
+// ============================================================
+function manualDetectLoop() {
+  if (!started || !handPose) return;
+  if (video && video.readyState >= 2 && video.videoWidth > 0) {
+    handPose
+      .detect(video, (results) => gotHands(results))
+      .catch((e) => console.error("[Light Chaser] 手动检测出错：", e));
+  }
+  requestAnimationFrame(manualDetectLoop);
 }
 
 function draw() {
@@ -241,7 +302,9 @@ function updateLightFromHands() {
 
   noHandCounter = 0;
 
-  const lm = hands[0].landmarks; // 21 个关键点
+    // ml5 1.x 的 handPose 结果里，每只手的 21 个关键点字段名是
+  // keypoints（不是 landmarks！），坐标为原始视频像素坐标。
+  const lm = hands[0].keypoints;
   if (!lm || lm.length < 21) return;
 
   const wrist = lm[0];
@@ -259,11 +322,12 @@ function updateLightFromHands() {
   }
 
     // ---------- 位置：视频坐标 → 画布坐标（cover 映射，不变形）----------
-  // handPose 使用 flipped:false，landmark 坐标为原始（非镜像）视频像素坐标。
-  // 这里做一次水平镜像（x → 1 - x），使光斑移动方向符合“照镜子”直觉，
-  // 且与去掉 CSS 镜像的预览窗画面一一对应。
-  const vw = 640;
-  const vh = 480;
+    // handPose 使用 flipped:false，keypoints 坐标为原始（非镜像）视频像素坐标。
+    // 这里做一次水平镜像（x → 1 - x），使光斑移动方向符合“照镜子”直觉，
+    // 且与去掉 CSS 镜像的预览窗画面一一对应。
+    // 视频实际尺寸优先取 video 的真实宽高，避免非 640×480 设备上映射偏移。
+    const vw = (video && video.videoWidth) || 640;
+    const vh = (video && video.videoHeight) || 480;
   const scale = Math.max(width / vw, height / vh);
   const offsetX = (width - vw * scale) / 2;
   const offsetY = (height - vh * scale) / 2;
