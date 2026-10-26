@@ -136,15 +136,15 @@
     #hud .on  { color: #cfe8b0; }
     #hud .off { color: #7a6a5a; }
 
-                /* ---------- 摄像头实时预览（右下角 150×150） ---------- */
-    #cam-preview {
+                /* ---------- 摄像头实时预览（右下角 160×120，与视频 4:3 同比例） ---------- */
+                        #cam-preview {
       position: fixed;
       right: 20px;
       bottom: 20px;
-      width: 150px;
-      height: 150px;
+      width: 160px;
+      height: 120px;
       z-index: 6;
-      object-fit: cover;         /* 视频铺满方形窗口，不变形 */
+      object-fit: cover;         /* 视频铺满预览窗口，不变形 */
       border: 1px solid rgba(255, 233, 168, 0.25);
       border-radius: 8px;
       box-shadow: 0 0 18px rgba(0, 0, 0, 0.6);

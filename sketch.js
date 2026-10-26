@@ -8,7 +8,7 @@
 //   3. 握拳             → 熄灭聚光灯（防抖）
 //      摊开手掌         → 重新点亮
 //   4. 点击按钮开启摄像头（满足浏览器安全策略）
-//   5. 右下角 150×150 摄像头实时预览窗口（便于观察摄像头画面）
+//   5. 右下角 160×120 摄像头实时预览窗口（便于观察摄像头画面）
 //
 //  优化点：
 //   - landmark 低通平滑 + 缓动跟随，抑制识别抖动
@@ -17,6 +17,18 @@
 //   - 光斑外碎片用极暗灰色绘制，亮灯/关灯之间平滑过渡
 //   - 握拳 / 摊掌都需连续多帧才切换，中间状态不触发
 //   - 长时间无手自动熄灯
+//
+//  【本版重点修复：模型未就绪就调用识别】
+//   报错：TypeError: Cannot read properties of null (reading 'estimateHands')
+//   原因：ml5.handPose() 返回的是一个「外壳对象」，内部真正的模型
+//        （this.model）是异步创建的。若在创建完成前就调用 detectStart /
+//        detect，内部会去访问 model.estimateHands → 得到 null 引用报错。
+//   修复：全程 async/await ——
+//        ① const pose = await ml5.handPose({...})
+//        ② await pose.ready;               // 官方就绪 Promise
+//        ③ await ensureModelReady(pose);   // 二次确认内部 model 已创建
+//        ④ 以上都通过后，才 handPose.detectStart(video, cb)
+//        加载期间屏幕显示「模型加载中，请等待」。
 //
 //  【识别失败修复（关键）】
 //   ml5 1.x 的 handPose 结果中，每只手的关节点字段名是 keypoints
@@ -39,12 +51,13 @@ let video = null;
 let hands = [];
 
 // ---- 检测循环健康检查 ----
-let detectCallbackCount = 0; // detectStart 回调被调用的次数
+let detectCallbackCount = 0;   // detectStart 回调被调用的次数
 let usingManualDetect = false; // 是否切换到了手动逐帧检测模式
 
 // ---- 运行状态 ----
-let started = false;   // 是否已成功启动摄像头 + 模型
-let poseReady = false; // HandPose 模型是否就绪
+let started = false;      // 是否已成功启动摄像头 + 模型并开始识别
+let poseReady = false;    // HandPose 模型是否真正就绪（内部 model 已创建）
+let loadingModel = false; // 是否正在加载模型（用于屏幕“加载中”提示）
 
 // ---- 光斑显示值 ----
 let lightOn = true;
@@ -60,8 +73,8 @@ let targetRadius = 120;
 
 // 缓动系数（0~1，越大越"跟手"）
 const EASE_POS = 0.2;
-const EASE_RADIUS = 0.1;
-const EASE_POWER = 0.12;
+const EASE_RADIUS = 0.16;
+const EASE_POWER = 0.1;
 
 // landmark 低通平滑系数（0~1，越小越平滑）
 const SMOOTH_XY = 0.45;
@@ -87,8 +100,8 @@ let fragments = [];
 // ---- 手势防抖 ----
 let fistCounter = 0; // 连续判定为握拳的帧数
 let openCounter = 0; // 连续判定为摊掌的帧数
-const FIST_FRAMES = 4; // 连续 4 帧握拳才关灯
-const OPEN_FRAMES = 4; // 连续 4 帧摊掌才开灯
+const FIST_FRAMES = 4;     // 连续 4 帧握拳才关灯
+const OPEN_FRAMES = 4;     // 连续 4 帧摊掌才开灯
 const NO_HAND_FRAMES = 45; // 约 0.75s 无手后自动熄灯
 let noHandCounter = 0;
 
@@ -110,7 +123,8 @@ function setup() {
   cacheDomElements();
 
   // 绑定"开启摄像头"按钮（必须由用户点击，才会弹出授权）
-  startBtnEl.addEventListener("click", startCamera, { once: true });
+  // 注意：不再用 { once: true }，这样加载失败后还能重试
+  startBtnEl.addEventListener("click", startCamera);
 }
 
 // ============================================================
@@ -120,17 +134,26 @@ function cacheDomElements() {
   hudEl = document.getElementById("hud");
   hudHandEl = document.getElementById("hudHand");
   hudLightEl = document.getElementById("hudLight");
-    overlayEl = document.getElementById("overlay");
+  overlayEl = document.getElementById("overlay");
   startBtnEl = document.getElementById("startBtn");
-  camPreviewEl = document.getElementById("cam-preview"); // 右下角 150×150 实时预览
+  camPreviewEl = document.getElementById("cam-preview"); // 右下角实时预览
+}
+
+// 更新加载提示文案（遮罩里的按钮文字，与画布上的提示配合）
+function setLoadingHint(text) {
+  if (startBtnEl) startBtnEl.textContent = text;
 }
 
 // ============================================================
 //  摄像头 + 模型启动（必须在用户点击后调用）
+//  全程 async/await：严格保证「模型就绪 → 才开始检测」的顺序
 // ============================================================
 async function startCamera() {
+  // 防止重复点击启动多个检测循环
+  if (loadingModel || started) return;
+
   startBtnEl.disabled = true;
-  startBtnEl.textContent = "正在请求摄像头…";
+  setLoadingHint("正在请求摄像头…");
 
   // ---------- 1. 申请摄像头（触发浏览器授权弹窗）----------
   let stream;
@@ -142,7 +165,7 @@ async function startCamera() {
   } catch (err) {
     console.error("[Light Chaser] 摄像头启用失败：", err);
     startBtnEl.disabled = false;
-    startBtnEl.textContent = "重新尝试开启摄像头";
+    setLoadingHint("重新尝试开启摄像头");
     alert(
       "无法访问摄像头：\n" +
         (err && err.message ? err.message : err) +
@@ -153,8 +176,8 @@ async function startCamera() {
     return;
   }
 
-    // ---------- 检测输入：直接使用原生 <video>（#cam-preview） ----------
-  // 不再用 createCapture() 的 p5 封装对象，避免某些版本下 ml5 拿到
+  // ---------- 检测输入：直接使用原生 <video>（#cam-preview） ----------
+  // 不用 createCapture() 的 p5 封装对象，避免某些版本下 ml5 拿到
   // 的是 0×0 的帧。原生 HTMLVideoElement 是 tfjs fromPixels 最稳的输入。
   // 这个 <video> 同时作为右下角的实时预览窗（一物两用）。
   if (camPreviewEl) {
@@ -175,18 +198,34 @@ async function startCamera() {
     // 某些浏览器自动播放策略下 play() 可能被拒绝，忽略即可
   }
 
-  startBtnEl.textContent = "正在加载手势模型…（首次约 10s）";
+  // ---------- 2. 加载 HandPose 模型（关键：必须等它真正就绪）----------
+  loadingModel = true;
+  setLoadingHint("模型加载中，请等待…");
 
-        // ---------- 2. HandPose 模型 ----------
   try {
     // flipped: false → 模型直接使用摄像头原始（非镜像）帧，
     // 与预览窗画面完全一致，保证识别与预览匹配。
     // 镜像效果统一在 updateLightFromHands() 的画布映射中处理。
-    handPose = await ml5.handPose({
-      maxHands: 1, // 只识别单手，省算力
+    const pose = await ml5.handPose({
+      maxHands: 1,        // 只识别单手，省算力
       flipped: false,
-      modelType: "lite", // lite 模型更快
+      modelType: "lite",  // lite 模型更快
     });
+
+    // ml5 1.x 的模型对象带 ready Promise：内部真实模型加载完成才 resolve。
+    // 这是避免 “null.estimateHands” 的第一道保险。
+    if (pose && pose.ready && typeof pose.ready.then === "function") {
+      await pose.ready;
+    }
+
+    // 先存进全局实例
+    handPose = pose;
+
+    // 第二道保险：轮询确认内部 model（检测器）确实已创建
+    const ok = await ensureModelReady(handPose);
+    if (!ok) {
+      throw new Error("HandPose 模型对象未就绪（内部 model 仍为 null）");
+    }
 
     await waitForVideo(); // 等视频真正出帧再开始检测
 
@@ -198,6 +237,11 @@ async function startCamera() {
       "readyState=" + video.readyState
     );
 
+    // ---------- 3. 模型确认就绪，才开始检测 ----------
+    poseReady = true;
+    started = true;
+    loadingModel = false;
+
     // 重置探测计数，用于判断检测循环是否真的在回调
     detectCallbackCount = 0;
 
@@ -206,28 +250,34 @@ async function startCamera() {
       gotHands(results);
     });
 
-    poseReady = true;
-    started = true;
-
     // 淡出遮罩，显示 HUD
     overlayEl.classList.add("hidden");
     hudEl.classList.add("visible");
 
-    // ---------- 3. 兜底：若 detectStart 循环没跑起来，改用手动逐帧检测 ----------
+    // ---------- 4. 兜底：若 detectStart 循环没跑起来，改用手动逐帧检测 ----------
     setTimeout(() => {
-      if (detectCallbackCount === 0 && !usingManualDetect) {
+      if (started && detectCallbackCount === 0 && !usingManualDetect) {
         console.warn(
           "[Light Chaser] detectStart 未产生回调，切换到手动逐帧检测模式"
         );
         usingManualDetect = true;
-        handPose.detectStop();
+        try {
+          handPose.detectStop();
+        } catch (e) {
+          // 忽略：部分版本在未启动时 detectStop 会抛错
+        }
         manualDetectLoop();
       }
     }, 3000);
   } catch (err) {
     console.error("[Light Chaser] HandPose 初始化失败：", err);
+    loadingModel = false;
+    poseReady = false;
+    started = false;
+    handPose = null;
+
     startBtnEl.disabled = false;
-    startBtnEl.textContent = "重新尝试开启摄像头";
+    setLoadingHint("重新尝试开启摄像头");
     alert(
       "手势模型加载失败，请检查网络（模型需从 CDN 下载）。\n" +
         (err && err.message ? err.message : err)
@@ -235,13 +285,53 @@ async function startCamera() {
   }
 }
 
+// ============================================================
+//  确认模型内部真的就绪
+//  ml5 1.x 的 HandPose 实例内部持有 this.model（检测模型；
+//  底层 hand-pose-detection 用 MediaPipeHandDetector，其识别入口即
+//  estimateHands）。只要 model 仍为 null 就绝对不能调用 detect / detectStart。
+//  这里做「await ready + 限时轮询」双保险，兼容不同小版本字段差异。
+// ============================================================
+async function ensureModelReady(pose, maxMs = 20000) {
+  if (!pose) return false;
+
+  // 第一道：官方 ready Promise（存在就 await，最可靠）
+  if (pose.ready && typeof pose.ready.then === "function") {
+    try {
+      await pose.ready;
+    } catch (e) {
+      console.error("[Light Chaser] 模型 ready 被拒绝：", e);
+      return false;
+    }
+  }
+
+  // 第二道：轮询内部字段。model 必须存在。
+  // segmenter 若为 undefined（该版本无此字段）则视为 OK；为 null 则继续等。
+  const t0 = performance.now();
+  while (performance.now() - t0 < maxMs) {
+    const modelOk = !!pose.model;
+    const segOk = pose.segmenter === undefined || !!pose.segmenter;
+    if (modelOk && segOk) return true;
+    await sleep(100);
+  }
+  return !!pose.model;
+}
+
+/** 基于 Promise 的 sleep，用于轮询等待 */
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /** 等待视频元数据 + 首帧就绪 */
 function waitForVideo(maxMs = 6000) {
   return new Promise((resolve) => {
     const t0 = performance.now();
-        const check = () => {
+    const check = () => {
       const el = video; // 原生 HTMLVideoElement
-      if ((el && el.readyState >= 2 && el.videoWidth > 0) || performance.now() - t0 > maxMs) {
+      if (
+        (el && el.readyState >= 2 && el.videoWidth > 0) ||
+        performance.now() - t0 > maxMs
+      ) {
         resolve();
       } else {
         setTimeout(check, 60);
@@ -254,9 +344,16 @@ function waitForVideo(maxMs = 6000) {
 // ============================================================
 //  手动逐帧检测（detectStart 失效时的兜底方案）
 //  用 requestAnimationFrame 驱动，避免阻塞主线程
+//  每帧都检查内部 model，未就绪就跳过，绝不触发空引用
 // ============================================================
 function manualDetectLoop() {
-  if (!started || !handPose) return;
+  if (!started || !handPose || !poseReady) return;
+
+  if (!handPose.model) {
+    requestAnimationFrame(manualDetectLoop);
+    return;
+  }
+
   if (video && video.readyState >= 2 && video.videoWidth > 0) {
     handPose
       .detect(video, (results) => gotHands(results))
@@ -269,7 +366,7 @@ function draw() {
   background(0);
 
   // ---------- 1. 从手势更新目标值（只算目标，不直接改显示值） ----------
-  if (started) updateLightFromHands();
+  if (started && poseReady) updateLightFromHands();
 
   // ---------- 2. 缓动跟随：位置 / 半径 / 光强 ----------
   lightX = lerp(lightX, targetX, EASE_POS);
@@ -284,7 +381,38 @@ function draw() {
   blendMode(BLEND);
 
   drawVignette();
+
+  // ---------- 4. 模型加载中：在画布上显示提示文字 ----------
+  if (loadingModel) drawLoadingText();
+
   updateHUD();
+}
+
+// ============================================================
+//  画布上的「模型加载中，请等待」提示
+// ============================================================
+function drawLoadingText() {
+  push();
+  textAlign(CENTER, CENTER);
+
+  // 半透明底条，保证在任何画面上都清晰可读
+  noStroke();
+  fill(0, 150);
+  const w = Math.min(width * 0.8, 460);
+  rect((width - w) / 2, height / 2 + 62, w, 76, 38);
+
+  // 呼吸闪烁的主文字
+  const pulse = 0.6 + 0.4 * Math.sin(frameCount * 0.08);
+  fill(255, 236, 180, 255 * pulse);
+  textSize(18);
+  text("模型加载中，请等待…", width / 2, height / 2 + 88);
+
+  // 小圆点动画，表示正在工作
+  const dots = ".".repeat((Math.floor(frameCount / 18) % 3) + 1);
+  fill(255, 236, 180, 150);
+  textSize(13);
+  text(dots, width / 2, height / 2 + 116);
+  pop();
 }
 
 // ============================================================
@@ -302,7 +430,7 @@ function updateLightFromHands() {
 
   noHandCounter = 0;
 
-    // ml5 1.x 的 handPose 结果里，每只手的 21 个关键点字段名是
+  // ml5 1.x 的 handPose 结果里，每只手的 21 个关键点字段名是
   // keypoints（不是 landmarks！），坐标为原始视频像素坐标。
   const lm = hands[0].keypoints;
   if (!lm || lm.length < 21) return;
@@ -321,13 +449,13 @@ function updateLightFromHands() {
     smoothWristZ += ((wrist.z || 0) - smoothWristZ) * SMOOTH_Z;
   }
 
-    // ---------- 位置：视频坐标 → 画布坐标（cover 映射，不变形）----------
-    // handPose 使用 flipped:false，keypoints 坐标为原始（非镜像）视频像素坐标。
-    // 这里做一次水平镜像（x → 1 - x），使光斑移动方向符合“照镜子”直觉，
-    // 且与去掉 CSS 镜像的预览窗画面一一对应。
-    // 视频实际尺寸优先取 video 的真实宽高，避免非 640×480 设备上映射偏移。
-    const vw = (video && video.videoWidth) || 640;
-    const vh = (video && video.videoHeight) || 480;
+  // ---------- 位置：视频坐标 → 画布坐标（cover 映射，不变形）----------
+  // handPose 使用 flipped:false，keypoints 坐标为原始（非镜像）视频像素坐标。
+  // 这里做一次水平镜像（x → vw - x），使光斑移动方向符合“照镜子”直觉，
+  // 且与去掉 CSS 镜像的预览窗画面一一对应。
+  // 视频实际尺寸优先取 video 的真实宽高，避免非 640×480 设备上映射偏移。
+  const vw = (video && video.videoWidth) || 640;
+  const vh = (video && video.videoHeight) || 480;
   const scale = Math.max(width / vw, height / vh);
   const offsetX = (width - vw * scale) / 2;
   const offsetY = (height - vh * scale) / 2;
@@ -367,7 +495,7 @@ function updateLightFromHands() {
  */
 function countFoldedFingers(lm) {
   const tips = [8, 12, 16, 20];
-    const pips = [6, 10, 14, 18];
+  const pips = [6, 10, 14, 18];
   const wrist = lm[0];
   let folded = 0;
 
@@ -446,7 +574,7 @@ function drawFragments() {
     }
 
     // ---- 光斑内：被照亮 ----
-    const d = Math.sqrt(d2) / r;   // 0=中心，1=边缘
+    const d = Math.sqrt(d2) / r;    // 0=中心，1=边缘
     const falloff = 1 - d;
     const soft = falloff * falloff; // 平方衰减，光晕更柔和
 
