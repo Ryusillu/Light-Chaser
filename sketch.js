@@ -292,7 +292,7 @@ async function startCamera() {
     // 镜像效果统一在 updateLightFromHands() / 预览骨架中处理。
     const pose = await ml5.handPose({
       maxHands: 1,        // 只识别单手，省算力
-      flipped: false,
+      flipped: true,
       modelType: "lite",  // lite 模型更快
     });
 
